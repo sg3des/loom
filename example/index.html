@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>LOOM</title>
+	<script type="text/javascript" src="loom.js"></script>
+</head>
+<body>
+<script>
+let l = new Loom("ws://127.0.0.1:8080/ws", function(l) {
+
+	l.call("hello", {name: "world"}).then(function(resp) {
+		console.log(resp);
+	}, function(err) {
+		console.error(err);
+	});
+	
+});
+
+</script>
+
+</body>
+</html>
