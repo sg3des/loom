@@ -5,21 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"reflect"
 	"sync"
 
+	"github.com/op/go-logging"
 	"golang.org/x/net/websocket"
 )
 
+var log = logging.MustGetLogger("LOOM")
 var Debug bool
 
 type Handler func(req interface{}) (resp interface{}, err error)
 
+const clientFieldName = "Client"
+
 type Loom struct {
-	clients  sync.Map // key: websocket.Conn, value: *client
-	handlers sync.Map // key: route path,     value: *handler
+	sync.Mutex
+	clients  map[*websocket.Conn]*Client
+	handlers map[string]*handler
 
 	onConnect    Handler
 	onDisconnect Handler
@@ -31,7 +35,10 @@ type Loom struct {
 
 // NewLoom return instance of Loom
 func NewLoom() *Loom {
-	return &Loom{}
+	return &Loom{
+		clients:  make(map[*websocket.Conn]*Client),
+		handlers: make(map[string]*handler),
+	}
 }
 
 //Handler return http.Handler with websocket
@@ -41,7 +48,7 @@ func (l *Loom) Handler() http.Handler {
 
 // SetHandler by route path
 func (l *Loom) SetHandler(route string, h interface{}) {
-	l.handlers.Store(route, newhandler(h))
+	l.handlers[route] = newhandler(h)
 }
 
 // OnConnect bind event onconnect
@@ -63,41 +70,61 @@ type handler struct {
 	v reflect.Value
 	t reflect.Type
 
-	req reflect.Type
+	req        reflect.Type
+	passclient bool
 }
 
 func newhandler(h interface{}) *handler {
-	v := reflect.ValueOf(h)
-	t := reflect.TypeOf(h)
-	req := t.In(0).Elem()
+	handler := &handler{
+		h: h,
+		v: reflect.ValueOf(h),
+		t: reflect.TypeOf(h),
+	}
 
-	return &handler{h: h, v: v, t: t, req: req}
+	handler.req = handler.t.In(0).Elem()
+	_, handler.passclient = handler.req.FieldByName(clientFieldName)
+
+	return handler
 }
 
 // gethandler by route path
-func (l *Loom) gethandler(route string) (*handler, bool) {
-	h, ok := l.handlers.Load(route)
-	if !ok {
-		return nil, ok
-	}
-
-	return h.(*handler), ok
+func (l *Loom) gethandler(route string) (h *handler, ok bool) {
+	h, ok = l.handlers[route]
+	return
 }
 
-func (h *handler) call(data []byte) (resp []byte, err error) {
+func (h *handler) call(data json.RawMessage, c *Client) (resp interface{}, err error) {
 	req := reflect.New(h.req)
 	if err := json.Unmarshal(data, req.Interface()); err != nil {
-		return nil, err
+		return resp, err
+	}
+
+	if h.passclient {
+		req.Elem().FieldByName(clientFieldName).Set(reflect.ValueOf(c))
 	}
 
 	out := h.v.Call([]reflect.Value{req})
 
-	if !out[0].IsNil() {
-		resp, _ = json.Marshal(out[0].Interface())
+	switch len(out) {
+	case 1:
+		if !out[0].IsNil() {
+			err = out[0].Interface().(error)
+		}
+	case 2:
+		if !out[0].IsNil() {
+			resp = out[0].Interface()
+		}
+		if !out[1].IsNil() {
+			err = out[1].Interface().(error)
+		}
 	}
-	if !out[1].IsNil() {
-		err = out[1].Interface().(error)
-	}
+
+	// if !out[0].IsNil() {
+	// 	resp = out[0].Interface()
+	// }
+	// if !out[1].IsNil() {
+	// 	err = out[1].Interface().(error)
+	// }
 
 	return
 }
@@ -106,7 +133,7 @@ func (h *handler) call(data []byte) (resp []byte, err error) {
 // client
 //
 
-type client struct {
+type Client struct {
 	ws     *websocket.Conn
 	closed bool
 }
@@ -115,93 +142,151 @@ type client struct {
 func (l *Loom) wshandler(ws *websocket.Conn) {
 	c := l.getclient(ws)
 	if Debug {
-		log.Println("new client:", c.ws.RemoteAddr())
+		log.Debug("new client:", c.ws.RemoteAddr())
 	}
 
 	scanner := bufio.NewScanner(ws)
-	for scanner.Scan() && c != nil {
-		req, err := l.parseRequest(scanner.Bytes())
+	for scanner.Scan() && c != nil && !c.closed {
+		msg, err := l.parsemsg(scanner.Bytes())
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			continue
 		}
 
-		go func(req request) {
-			resp, err := req.handler.call(req.Data)
-			c.write(req.ID, resp, err)
-		}(req)
+		log.Debug("call", msg)
+
+		go func(msg *message) {
+
+			resp, err := msg.handler.call(msg.Data, c)
+			log.Debug(resp, err)
+
+			rawmsg := newmsg(msg.ID, "", resp, err)
+
+			if err := l.sendmsg(c, rawmsg); err != nil && err != ErrClientClosed {
+				l.Disconnect(c)
+			}
+
+		}(msg)
 	}
 
-	l.disconnect(c)
+	l.Disconnect(c)
 }
 
-func (l *Loom) getclient(ws *websocket.Conn) *client {
-	if v, ok := l.clients.Load(ws); ok {
-		return v.(*client)
+func (l *Loom) getclient(ws *websocket.Conn) (c *Client) {
+	l.Lock()
+
+	c, ok := l.clients[ws]
+	if !ok {
+		c = &Client{ws: ws}
+		l.clients[ws] = c
 	}
 
-	c := &client{ws: ws}
-	l.clients.Store(ws, c)
-
+	l.Unlock()
 	return c
 }
 
-func (c *client) write(id string, resp []byte, err error) {
-	if c.closed {
-		return
-	}
+func (l *Loom) Disconnect(c *Client) {
+	l.Lock()
+	delete(l.clients, c.ws)
+	l.Unlock()
 
-	if err := json.NewEncoder(c.ws).Encode(response{
-		ID:    id,
-		Data:  string(resp),
-		Error: err,
-	}); err != nil {
-		log.Println("ERROR", err)
-	}
-}
-
-func (l *Loom) disconnect(c *client) {
-	l.clients.Delete(c.ws)
 	c.ws.Close()
 	c.closed = true
 }
 
 //
-// request
+// message
 //
 
-type request struct {
+type message struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
 	Data   json.RawMessage `json:"data"`
+	Error  string          `json:"error"`
 
 	handler *handler
 }
 
-func (l *Loom) parseRequest(data []byte) (req request, err error) {
+func newmsg(id, method string, data interface{}, err error) string {
+	jsondata, err := json.Marshal(data)
+	if err != nil {
+		panic(err)
+	}
+
+	msg := message{
+		ID:     id,
+		Method: method,
+		Data:   jsondata,
+	}
+
+	if err != nil {
+		msg.Error = err.Error()
+	}
+
+	b, _ := json.Marshal(msg)
+
+	return string(b)
+}
+
+func (l *Loom) parsemsg(data []byte) (msg *message, err error) {
 	if len(data) == 0 {
-		return req, errors.New("request is empty")
+		return nil, errors.New("request is empty")
 	}
 
-	if err := json.Unmarshal(data, &req); err != nil {
-		return req, err
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, err
 	}
 
-	h, ok := l.gethandler(req.Method)
+	h, ok := l.gethandler(msg.Method)
 	if !ok {
-		return req, fmt.Errorf("handler '%s' not found", req.Method)
+		return msg, fmt.Errorf("handler '%s' not found", msg.Method)
 	}
-	req.handler = h
+	msg.handler = h
 
 	return
 }
 
+var ErrClientClosed = errors.New("connection closed")
+
+func (l *Loom) sendmsg(c *Client, rawmsg string) error {
+	if c.closed {
+		return ErrClientClosed
+	}
+
+	_, err := fmt.Fprintln(c.ws, rawmsg)
+	return err
+}
+
+func (c *Client) Call(method string, data interface{}) error {
+	if c.closed {
+		return ErrClientClosed
+	}
+
+	rawmsg := newmsg(remoteCallID, method, data, nil)
+
+	_, err := fmt.Fprintln(c.ws, rawmsg)
+	return err
+}
+
 //
-// response
+// broadcast
 //
 
-type response struct {
-	ID    string `json:"id"`
-	Data  string `json:"data"`
-	Error error  `json:"error"`
+const remoteCallID = "0"
+
+func (l *Loom) Broadcast(method string, data interface{}) (n int, err error) {
+	rawmsg := newmsg(remoteCallID, method, data, err)
+
+	for _, c := range l.clients {
+		err = l.sendmsg(c, rawmsg)
+		if err != nil {
+			if err != ErrClientClosed {
+				l.Disconnect(c)
+			}
+			continue
+		}
+		n++
+	}
+
+	return
 }

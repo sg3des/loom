@@ -6,15 +6,19 @@
 </head>
 <body>
 <script>
-let l = new Loom("ws://127.0.0.1:8080/ws", function(l) {
+let loom = new Loom("ws://127.0.0.1:8080/ws", function(loom) {
 
-	l.call("hello", {name: "world"}).then(function(resp) {
+	loom.call("hello", {name: "world"}).then(function(resp) {
 		console.log(resp);
 	}, function(err) {
 		console.error(err);
 	});
-	
+
 });
+
+loom.sethandler("js", function(req) {
+	console.log(req);
+})
 
 </script>
 

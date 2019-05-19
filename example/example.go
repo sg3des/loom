@@ -21,10 +21,12 @@ func main() {
 
 type helloData struct {
 	Name string
+
+	Client *loom.Client `json:"-"`
 }
 
 func hello(req *helloData) (*helloData, error) {
-	log.Println(req)
+	log.Println(req, req.Client)
 
 	return &helloData{
 		Name: "Hello, " + req.Name,
