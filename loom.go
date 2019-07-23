@@ -22,8 +22,9 @@ type ClientHandler func(*Client)
 const clientFieldName = "Client"
 
 type Loom struct {
-	sync.Mutex
-	clients  map[*websocket.Conn]*Client
+	// sync.Mutex
+	// clients  map[*websocket.Conn]*Client
+	clients  sync.Map
 	handlers map[string]*handler
 
 	onConnect    ClientHandler
@@ -37,7 +38,7 @@ type Loom struct {
 // NewLoom return instance of Loom
 func NewLoom() *Loom {
 	return &Loom{
-		clients:  make(map[*websocket.Conn]*Client),
+		// clients:  make(map[*websocket.Conn]*Client),
 		handlers: make(map[string]*handler),
 	}
 }
@@ -143,12 +144,13 @@ type Client struct {
 func (l *Loom) wshandler(ws *websocket.Conn) {
 	c := l.getclient(ws)
 	if Debug {
-		log.Debug("new client:", c.ws.RemoteAddr(), c.ws.LocalAddr())
-		log.Debug("total clients:", len(l.clients))
+		log.Debug("new client:", c.ws.RemoteAddr())
+		log.Debug("total clients:", l.ClientsLen())
 	}
 
 	if l.onConnect != nil {
 		l.onConnect(c)
+		log.Debug("total clients:", l.ClientsLen())
 	}
 
 	scanner := bufio.NewScanner(ws)
@@ -161,6 +163,7 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 
 		if Debug {
 			log.Debug("call:", msg.Method, string(msg.Data))
+			log.Debug("total clients:", l.ClientsLen())
 		}
 
 		go func(msg *message) {
@@ -176,7 +179,7 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 		}(msg)
 	}
 
-	if l.onConnect != nil {
+	if l.onDisconnect != nil {
 		l.onDisconnect(c)
 	}
 
@@ -184,25 +187,17 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 }
 
 func (l *Loom) getclient(ws *websocket.Conn) (c *Client) {
-	l.Lock()
-
-	c, ok := l.clients[ws]
-	if !ok {
-		c = &Client{ws: ws}
-		l.clients[ws] = c
-	}
-
-	l.Unlock()
+	client, _ := l.clients.LoadOrStore(ws, &Client{ws: ws})
+	c = client.(*Client)
 	return c
 }
 
 func (l *Loom) Disconnect(c *Client) {
-	l.Lock()
-	delete(l.clients, c.ws)
-	l.Unlock()
-
-	c.ws.Close()
+	if Debug {
+		log.Debug("disconnect client:", c.ws.RemoteAddr())
+	}
 	c.closed = true
+	l.clients.Delete(c.ws)
 }
 
 //
@@ -279,6 +274,10 @@ func (c *Client) Call(method string, data interface{}) error {
 	return err
 }
 
+func (c *Client) Connected() bool {
+	return !c.closed
+}
+
 //
 // broadcast
 //
@@ -288,16 +287,23 @@ const remoteCallID = "0"
 func (l *Loom) Broadcast(method string, data interface{}) (n int, err error) {
 	rawmsg := newmsg(remoteCallID, method, data, err)
 
-	for _, c := range l.clients {
-		err = l.sendmsg(c, rawmsg)
-		if err != nil {
-			if err != ErrClientClosed {
-				l.Disconnect(c)
-			}
-			continue
+	l.clients.Range(func(key, val interface{}) bool {
+		c := val.(*Client)
+		if err := l.sendmsg(c, rawmsg); err != nil {
+			return true
 		}
 		n++
-	}
 
+		return true
+	})
+
+	return
+}
+
+func (l *Loom) ClientsLen() (n int) {
+	l.clients.Range(func(key, val interface{}) bool {
+		n++
+		return true
+	})
 	return
 }
