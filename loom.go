@@ -17,6 +17,7 @@ var log = logging.MustGetLogger("LOOM")
 var Debug bool
 
 type Handler func(req interface{}) (resp interface{}, err error)
+type ClientHandler func(*Client)
 
 const clientFieldName = "Client"
 
@@ -25,8 +26,8 @@ type Loom struct {
 	clients  map[*websocket.Conn]*Client
 	handlers map[string]*handler
 
-	onConnect    Handler
-	onDisconnect Handler
+	onConnect    ClientHandler
+	onDisconnect ClientHandler
 }
 
 //
@@ -52,12 +53,12 @@ func (l *Loom) SetHandler(route string, h interface{}) {
 }
 
 // OnConnect bind event onconnect
-func (l *Loom) OnConnect(f Handler) {
+func (l *Loom) OnConnect(f ClientHandler) {
 	l.onConnect = f
 }
 
 // OnDisconnect bind event onDisconnect
-func (l *Loom) OnDisconnect(f Handler) {
+func (l *Loom) OnDisconnect(f ClientHandler) {
 	l.onDisconnect = f
 }
 
@@ -142,7 +143,12 @@ type Client struct {
 func (l *Loom) wshandler(ws *websocket.Conn) {
 	c := l.getclient(ws)
 	if Debug {
-		log.Debug("new client:", c.ws.RemoteAddr())
+		log.Debug("new client:", c.ws.RemoteAddr(), c.ws.LocalAddr())
+		log.Debug("total clients:", len(l.clients))
+	}
+
+	if l.onConnect != nil {
+		l.onConnect(c)
 	}
 
 	scanner := bufio.NewScanner(ws)
@@ -153,20 +159,25 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 			continue
 		}
 
-		log.Debug("call", msg)
+		if Debug {
+			log.Debug("call:", msg.Method, string(msg.Data))
+		}
 
 		go func(msg *message) {
-
 			resp, err := msg.handler.call(msg.Data, c)
-			log.Debug(resp, err)
-
+			if Debug {
+				log.Debug("resp:", resp, err)
+			}
 			rawmsg := newmsg(msg.ID, "", resp, err)
-
 			if err := l.sendmsg(c, rawmsg); err != nil && err != ErrClientClosed {
 				l.Disconnect(c)
 			}
 
 		}(msg)
+	}
+
+	if l.onConnect != nil {
+		l.onDisconnect(c)
 	}
 
 	l.Disconnect(c)
