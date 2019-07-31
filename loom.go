@@ -138,6 +138,8 @@ func (h *handler) call(data json.RawMessage, c *Client) (resp interface{}, err e
 type Client struct {
 	ws     *websocket.Conn
 	closed bool
+
+	sendMsgs chan string
 }
 
 //wshandler is handler for websocket connections
@@ -171,10 +173,9 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 			if Debug {
 				log.Debug("resp:", resp, err)
 			}
+
 			rawmsg := newmsg(msg.ID, "", resp, err)
-			if err := l.sendmsg(c, rawmsg); err != nil && err != ErrClientClosed {
-				l.Disconnect(c)
-			}
+			l.sendmsg(c, rawmsg)
 
 		}(msg)
 	}
@@ -186,9 +187,20 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 	l.Disconnect(c)
 }
 
-func (l *Loom) getclient(ws *websocket.Conn) (c *Client) {
-	client, _ := l.clients.LoadOrStore(ws, &Client{ws: ws})
-	c = client.(*Client)
+func (l *Loom) getclient(ws *websocket.Conn) *Client {
+	if c, ok := l.clients.Load(ws); ok {
+		return c.(*Client)
+	}
+
+	c := &Client{
+		ws:       ws,
+		sendMsgs: make(chan string, 128),
+	}
+
+	go l.sendMsgsListener(c)
+
+	l.clients.Store(ws, c)
+
 	return c
 }
 
@@ -254,13 +266,29 @@ func (l *Loom) parsemsg(data []byte) (msg *message, err error) {
 
 var ErrClientClosed = errors.New("connection closed")
 
-func (l *Loom) sendmsg(c *Client, rawmsg string) error {
-	if c.closed {
-		return ErrClientClosed
+func (l *Loom) sendmsg(c *Client, rawmsg string) {
+	select {
+	case c.sendMsgs <- rawmsg:
+	default:
+		if Debug {
+			log.Warning("channel is full")
+		}
 	}
 
-	_, err := fmt.Fprintln(c.ws, rawmsg)
-	return err
+}
+
+func (l *Loom) sendMsgsListener(c *Client) {
+	for !c.closed {
+		rawmsg := <-c.sendMsgs
+
+		if c.closed {
+			break
+		}
+
+		if _, err := fmt.Fprintln(c.ws, rawmsg); err != nil && err != ErrClientClosed {
+			l.Disconnect(c)
+		}
+	}
 }
 
 func (c *Client) Call(method string, data interface{}) error {
@@ -284,16 +312,11 @@ func (c *Client) Connected() bool {
 
 const remoteCallID = "0"
 
-func (l *Loom) Broadcast(method string, data interface{}) (n int, err error) {
-	rawmsg := newmsg(remoteCallID, method, data, err)
+func (l *Loom) Broadcast(method string, data interface{}) {
+	rawmsg := newmsg(remoteCallID, method, data, nil)
 
 	l.clients.Range(func(key, val interface{}) bool {
-		c := val.(*Client)
-		if err := l.sendmsg(c, rawmsg); err != nil {
-			return true
-		}
-		n++
-
+		l.sendmsg(val.(*Client), rawmsg)
 		return true
 	})
 
