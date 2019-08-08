@@ -6,6 +6,12 @@ class Loom {
 		loom.responses = {};
 		loom.handlers = {};
 
+		let loc = window.location;
+		if (loc.protocol === 'https:') addr = "wss://";
+		else addr = "ws://"
+
+		addr += loc.host + "/ws";
+
 		loom.socket = new WebSocket(addr);
 
 		loom.socket.onmessage = function(e) {
