@@ -1,113 +1,157 @@
-'use strict';
 
-class Loom {
-	constructor(addr, onopen) {
-		let loom = this;
-		loom.responses = {};
-		loom.handlers = {};
+const ATTEMPTS_NUM = 100
+const ATTEMPTS_WAIT = 39
+const RECONNECT_INTERVAL = 10000
+const METHOD_ECHO = "_echo"
 
-		let loc = window.location;
-		if (loc.protocol === 'https:') addr = "wss://";
-		else addr = "ws://"
+export default class Loom {
+  // resppnses recieved from backend
+  responses = {}
 
-		addr += loc.host + "/ws";
+  // handlers is a local methods allow to be handle callbacks
+  handlers = {}
 
-		loom.socket = new WebSocket(addr);
+  _onclose = []
+  _onopen = []
+  _onreconnect = []
 
-		loom.socket.onmessage = function(e) {
-			let msg = JSON.parse(e.data);
+  addr = 'ws://...'
 
-			if (msg.id == "0") {
-				let h = loom.handlers[msg.method];
-				if (!h) {
-					console.error(`handler ${msg.method} not found`);
-					return;
-				}
+  constructor(addr) {
+    const u = new URL(addr === '/' ? window.location.toString() : addr)
 
-				h.handler.call(h.ctx, msg.data);
-				return;
-			}
+    // replace protocol http -> ws or https -> wss
+    u.protocol = u.protocol === 'http:' ? 'ws:' : 'wss:'
+    u.pathname = '/ws'
+    u.search = ''
 
-			loom.responses[msg.id] = {
-				data: msg.data,
-				err: msg.error,
-			}
-		};
+    this.addr = u.toString()
+    this.init()
+  }
 
-		loom.socket.onclose = function(e) {
-			console.log("close", e);
-		};
+  // initialize webscoket connection
+  init() {
+    this.socket = new WebSocket(this.addr)
 
-		loom.socket.onerror = function(e) {
-			console.error(e);
-		};
+    // recieve messages from backend
+    this.socket.onmessage = (e) => {
+      let msg = JSON.parse(e.data)
 
-		loom.socket.onopen = function() {
-			if (onopen) onopen(loom);
-		}
-	}
+      if (msg.method === METHOD_ECHO) {
+        return
+      }
 
-	sethandler(route, handler, ctx) {
-		let loom = this;
+      if (msg.id === '0') {
+        let h = this.handlers[msg.method]
+        if (!h) {
+          console.error(`handler ${msg.method} not found`)
+          return
+        }
 
-		// console.log(handler);
-		// console.log(ctx);
+        h.handler.call(h.ctx, msg.data)
+        return
+      }
 
-		// handler.bind(ctx);
-		loom.handlers[route] = {
-			handler: handler,
-			ctx: ctx
-		};
-	}
+      this.responses[msg.id] = {
+        data: msg.data,
+        err: msg.error,
+      }
+    }
 
-	_id() {
-		return Math.random().toString(36).substr(2, 8);
-	}
+    this.socket.onclose = (e) => {
+      console.warn('close', e)
 
-	_socket() {
-		let loom = this;
+      // TODO: handler close by user
+      setTimeout(() => {
+        console.warn('reconnect...')
+        this.init()
+      }, RECONNECT_INTERVAL)
 
-		return new Promise(function(resolve, reject) {
-			let iter = 0;
-			let i = setInterval(function() {
+      for (let callback of this._onclose) {
+        callback(this)
+      }
+    }
 
-				if (loom.socket.readyState) {
-					clearInterval(i);
-					resolve(loom.socket);
-				}
+    this.socket.onerror = (e) => {
+      console.error(e)
+    }
 
-				if (++iter > 100) reject("timeout");
-			}, 50);
-		});
-	}
+    this.socket.onopen = (e) => {
+      for (const callback of this._onopen) {
+        callback(this)
+      }
+    }
 
-	call(method, data) {
-		let loom = this;
+    return this.socket
+  }
 
-		let msg = {
-			id: loom._id(),
-			method: method,
-			data: data,
-		};
+  sethandler = (route, handler, ctx) => {
+    let loom = this
 
-		return loom._socket().then(function(socket) {
-			socket.send(`${JSON.stringify(msg)}\n`);
+    loom.handlers[route] = {
+      handler: handler,
+      ctx: ctx,
+    }
+  }
 
-			return new Promise(function(resolve, reject) {
-				let iter = 0;
-				let i = setInterval(function() {
-					let resp = loom.responses[msg.id];
+  _id() {
+    return Math.random().toString(36).substr(2, 8)
+  }
 
-					if (resp) {
-						clearInterval(i);
+  _socket() {
+    return new Promise((resolve, reject) => {
+      let iter = 0
+      let i = setInterval(() => {
+        if (this.socket.readyState) {
+          clearInterval(i)
+          resolve(this.socket)
+        }
 
-						if (resp.err) reject(resp.err);
-						resolve(resp.data);
-					}
+        if (++iter > ATTEMPTS_NUM) reject('timeout')
+      }, ATTEMPTS_WAIT)
+    })
+  }
 
-					if (++iter > 100) reject("timeout");
-				}, 50);
-			});
-		})
-	}
+  // call remote method and pass some data to it
+  call(method, data) {
+    let msg = {
+      id: this._id(),
+      method: method,
+      data: data,
+    }
+
+    return this._socket().then((socket) => {
+      socket.send(`${JSON.stringify(msg)}\n`)
+
+      return new Promise((resolve, reject) => {
+        let iter = 0
+        let i = setInterval(() => {
+          const resp = this.responses[msg.id]
+
+          if (resp) {
+            clearInterval(i)
+
+            delete this.responses[msg.id]
+
+            if (resp.err) reject(resp.err)
+            else resolve(resp.data)
+          }
+
+          if (++iter > ATTEMPTS_NUM) reject('timeout')
+        }, ATTEMPTS_WAIT)
+      })
+    })
+  }
+
+  onclose(method) {
+    this._onclose.push(method)
+  }
+
+  onopen(method) {
+    this._onopen.push(method)
+  }
+
+  onreconnect(method) {
+    this._onreconnect.push(method)
+  }
 }

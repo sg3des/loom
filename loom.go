@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/op/go-logging"
 	"golang.org/x/net/websocket"
@@ -43,7 +44,7 @@ func NewLoom() *Loom {
 	}
 }
 
-//Handler return http.Handler with websocket
+// Handler return http.Handler with websocket
 func (l *Loom) Handler() http.Handler {
 	return websocket.Handler(l.wshandler)
 }
@@ -110,7 +111,12 @@ func (h *handler) call(data json.RawMessage, c *Client) (resp interface{}, err e
 	switch len(out) {
 	case 1:
 		if !out[0].IsNil() {
-			err = out[0].Interface().(error)
+			r := out[0].Interface()
+			if e, ok := r.(error); ok {
+				err = e
+			} else {
+				r = resp
+			}
 		}
 	case 2:
 		if !out[0].IsNil() {
@@ -120,13 +126,6 @@ func (h *handler) call(data json.RawMessage, c *Client) (resp interface{}, err e
 			err = out[1].Interface().(error)
 		}
 	}
-
-	// if !out[0].IsNil() {
-	// 	resp = out[0].Interface()
-	// }
-	// if !out[1].IsNil() {
-	// 	err = out[1].Interface().(error)
-	// }
 
 	return
 }
@@ -139,10 +138,11 @@ type Client struct {
 	ws     *websocket.Conn
 	closed bool
 
-	sendMsgs chan string
+	sendMsgs  chan string
+	closeChan chan interface{}
 }
 
-//wshandler is handler for websocket connections
+// wshandler is handler for websocket connections
 func (l *Loom) wshandler(ws *websocket.Conn) {
 	c := l.getclient(ws)
 	if Debug {
@@ -176,7 +176,6 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 
 			rawmsg := newmsg(msg.ID, "", resp, err)
 			l.sendmsg(c, rawmsg)
-
 		}(msg)
 	}
 
@@ -193,11 +192,13 @@ func (l *Loom) getclient(ws *websocket.Conn) *Client {
 	}
 
 	c := &Client{
-		ws:       ws,
-		sendMsgs: make(chan string, 128),
+		ws:        ws,
+		sendMsgs:  make(chan string, 128),
+		closeChan: make(chan interface{}),
 	}
 
 	go l.sendMsgsListener(c)
+	go l.sendEchoMessages(c)
 
 	l.clients.Store(ws, c)
 
@@ -209,6 +210,7 @@ func (l *Loom) Disconnect(c *Client) {
 		log.Debug("disconnect client:", c.ws.RemoteAddr())
 	}
 	c.closed = true
+	c.closeChan <- nil
 	l.clients.Delete(c.ws)
 }
 
@@ -225,7 +227,7 @@ type message struct {
 	handler *handler
 }
 
-func newmsg(id, method string, data interface{}, err error) string {
+func newmsg(id, method string, data interface{}, errmsg error) string {
 	jsondata, err := json.Marshal(data)
 	if err != nil {
 		panic(err)
@@ -237,8 +239,8 @@ func newmsg(id, method string, data interface{}, err error) string {
 		Data:   jsondata,
 	}
 
-	if err != nil {
-		msg.Error = err.Error()
+	if errmsg != nil {
+		msg.Error = errmsg.Error()
 	}
 
 	b, _ := json.Marshal(msg)
@@ -274,18 +276,35 @@ func (l *Loom) sendmsg(c *Client, rawmsg string) {
 			log.Warning("channel is full")
 		}
 	}
-
 }
 
 func (l *Loom) sendMsgsListener(c *Client) {
 	for !c.closed {
-		rawmsg := <-c.sendMsgs
+		var rawmsg string
+		select {
+		case rawmsg = <-c.sendMsgs:
+			// continue
+		case <-c.closeChan:
+			return
+		}
 
 		if c.closed {
 			break
 		}
 
-		if _, err := fmt.Fprintln(c.ws, rawmsg); err != nil && err != ErrClientClosed {
+		_, err := fmt.Fprintln(c.ws, rawmsg)
+		if err != nil && err != ErrClientClosed {
+			l.Disconnect(c)
+			return
+		}
+	}
+}
+
+func (l *Loom) sendEchoMessages(c *Client) {
+	for !c.closed {
+		time.Sleep(1 * time.Minute)
+
+		if err := c.Call("_echo", nil); err != nil {
 			l.Disconnect(c)
 		}
 	}
@@ -306,6 +325,10 @@ func (c *Client) Connected() bool {
 	return !c.closed
 }
 
+func (c *Client) IP() string {
+	return c.ws.RemoteAddr().String()
+}
+
 //
 // broadcast
 //
@@ -319,8 +342,6 @@ func (l *Loom) Broadcast(method string, data interface{}) {
 		l.sendmsg(val.(*Client), rawmsg)
 		return true
 	})
-
-	return
 }
 
 func (l *Loom) ClientsLen() (n int) {
