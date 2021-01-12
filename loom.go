@@ -2,7 +2,6 @@ package loom
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/op/go-logging"
+	"github.com/sg3des/json"
 	"golang.org/x/net/websocket"
 )
 
@@ -228,7 +228,7 @@ type message struct {
 }
 
 func newmsg(id, method string, data interface{}, errmsg error) string {
-	jsondata, err := json.Marshal(data)
+	jsondata, err := json.MarshalSafeCollections(data)
 	if err != nil {
 		panic(err)
 	}
@@ -243,7 +243,7 @@ func newmsg(id, method string, data interface{}, errmsg error) string {
 		msg.Error = errmsg.Error()
 	}
 
-	b, _ := json.Marshal(msg)
+	b, _ := json.MarshalSafeCollections(msg)
 
 	return string(b)
 }
