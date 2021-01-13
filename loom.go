@@ -232,7 +232,7 @@ func newmsg(id, method string, data interface{}, errmsg error) string {
 	if err != nil {
 		log.Error(data)
 		log.Critical(err)
-		return "{}"
+		jsondata = []byte("{}")
 	}
 
 	msg := message{
