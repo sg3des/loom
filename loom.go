@@ -230,7 +230,9 @@ type message struct {
 func newmsg(id, method string, data interface{}, errmsg error) string {
 	jsondata, err := json.MarshalSafeCollections(data)
 	if err != nil {
-		panic(err)
+		log.Error(data)
+		log.Critical(err)
+		return "{}"
 	}
 
 	msg := message{
