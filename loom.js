@@ -17,13 +17,13 @@ export default class Loom {
 
   addr = 'ws://...'
 
-  constructor(addr) {
+  constructor(addr, broadcast=true) {
     const u = new URL(addr === '/' ? window.location.toString() : addr)
 
     // replace protocol http -> ws or https -> wss
     u.protocol = u.protocol === 'http:' ? 'ws:' : 'wss:'
     u.pathname = '/ws'
-    u.search = ''
+    u.search = !broadcast ? "?broadcast=false" : ''
 
     this.addr = u.toString()
     this.init()

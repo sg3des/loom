@@ -97,6 +97,12 @@ func (l *Loom) gethandler(route string) (h *handler, ok bool) {
 }
 
 func (h *handler) call(data json.RawMessage, c *Client) (resp interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
+
 	req := reflect.New(h.req)
 	if err := json.Unmarshal(data, req.Interface()); err != nil {
 		return resp, err
@@ -115,7 +121,7 @@ func (h *handler) call(data json.RawMessage, c *Client) (resp interface{}, err e
 			if e, ok := r.(error); ok {
 				err = e
 			} else {
-				r = resp
+				resp = r
 			}
 		}
 	case 2:
@@ -140,6 +146,8 @@ type Client struct {
 
 	sendMsgs  chan string
 	closeChan chan interface{}
+
+	allowBroadcast bool
 }
 
 // wshandler is handler for websocket connections
@@ -192,9 +200,10 @@ func (l *Loom) getclient(ws *websocket.Conn) *Client {
 	}
 
 	c := &Client{
-		ws:        ws,
-		sendMsgs:  make(chan string, 128),
-		closeChan: make(chan interface{}),
+		ws:             ws,
+		sendMsgs:       make(chan string, 128),
+		closeChan:      make(chan interface{}),
+		allowBroadcast: ws.Request().URL.Query().Get("broadcast") != "false",
 	}
 
 	go l.sendMsgsListener(c)
@@ -227,10 +236,19 @@ type message struct {
 	handler *handler
 }
 
-func newmsg(id, method string, data interface{}, errmsg error) string {
+func newmsg(id, method string, data interface{}, errmsg error) (resp string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Critical(r)
+			log.Criticalf("%+v", data)
+			resp = "{}"
+		}
+	}()
+
 	jsondata, err := json.MarshalSafeCollections(data)
 	if err != nil {
-		log.Error(data)
+		log.Errorf("%+v", data)
+		log.Error(string(jsondata))
 		log.Critical(err)
 		jsondata = []byte("{}")
 	}
@@ -341,7 +359,12 @@ func (l *Loom) Broadcast(method string, data interface{}) {
 	rawmsg := newmsg(remoteCallID, method, data, nil)
 
 	l.clients.Range(func(key, val interface{}) bool {
-		l.sendmsg(val.(*Client), rawmsg)
+		c := val.(*Client)
+
+		if c.allowBroadcast {
+			l.sendmsg(val.(*Client), rawmsg)
+		}
+
 		return true
 	})
 }
