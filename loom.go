@@ -23,8 +23,6 @@ type ClientHandler func(*Client)
 const clientFieldName = "Client"
 
 type Loom struct {
-	// sync.Mutex
-	// clients  map[*websocket.Conn]*Client
 	clients  sync.Map
 	handlers map[string]*handler
 
@@ -39,7 +37,6 @@ type Loom struct {
 // NewLoom return instance of Loom
 func NewLoom() *Loom {
 	return &Loom{
-		// clients:  make(map[*websocket.Conn]*Client),
 		handlers: make(map[string]*handler),
 	}
 }
@@ -47,6 +44,11 @@ func NewLoom() *Loom {
 // Handler return http.Handler with websocket
 func (l *Loom) Handler() http.Handler {
 	return websocket.Handler(l.wshandler)
+}
+
+type HTTPconn struct {
+	http.Handler
+	sync.Map
 }
 
 // SetHandler by route path
@@ -148,6 +150,8 @@ type Client struct {
 	closeChan chan interface{}
 
 	allowBroadcast bool
+
+	Request *http.Request
 }
 
 // wshandler is handler for websocket connections
@@ -199,11 +203,13 @@ func (l *Loom) getclient(ws *websocket.Conn) *Client {
 		return c.(*Client)
 	}
 
+	req := ws.Request()
 	c := &Client{
 		ws:             ws,
 		sendMsgs:       make(chan string, 128),
 		closeChan:      make(chan interface{}),
-		allowBroadcast: ws.Request().URL.Query().Get("broadcast") != "false",
+		allowBroadcast: req.URL.Query().Get("broadcast") != "false",
+		Request:        req,
 	}
 
 	go l.sendMsgsListener(c)
