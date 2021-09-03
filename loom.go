@@ -2,6 +2,7 @@ package loom
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/op/go-logging"
-	"github.com/sg3des/json"
 	"golang.org/x/net/websocket"
 )
 
@@ -156,7 +156,7 @@ type Client struct {
 
 // wshandler is handler for websocket connections
 func (l *Loom) wshandler(ws *websocket.Conn) {
-	c := l.getclient(ws)
+	c := l.newClient(ws)
 	if Debug {
 		log.Debug("new client:", c.ws.RemoteAddr())
 		log.Debug("total clients:", l.ClientsLen())
@@ -198,7 +198,7 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 	l.Disconnect(c)
 }
 
-func (l *Loom) getclient(ws *websocket.Conn) *Client {
+func (l *Loom) newClient(ws *websocket.Conn) *Client {
 	if c, ok := l.clients.Load(ws); ok {
 		return c.(*Client)
 	}
@@ -224,9 +224,15 @@ func (l *Loom) Disconnect(c *Client) {
 	if Debug {
 		log.Debug("disconnect client:", c.ws.RemoteAddr())
 	}
+	if c.closed {
+		log.Warning("attempt to disconnect already disconnected client")
+		return
+	}
+
 	c.closed = true
-	c.closeChan <- nil
 	l.clients.Delete(c.ws)
+
+	c.closeChan <- nil
 }
 
 //
@@ -251,7 +257,7 @@ func newmsg(id, method string, data interface{}, errmsg error) (resp string) {
 		}
 	}()
 
-	jsondata, err := json.MarshalSafeCollections(data)
+	jsondata, err := json.Marshal(data)
 	if err != nil {
 		log.Errorf("%+v", data)
 		log.Error(string(jsondata))
@@ -269,7 +275,7 @@ func newmsg(id, method string, data interface{}, errmsg error) (resp string) {
 		msg.Error = errmsg.Error()
 	}
 
-	b, _ := json.MarshalSafeCollections(msg)
+	b, _ := json.Marshal(msg)
 
 	return string(b)
 }
@@ -330,6 +336,9 @@ func (l *Loom) sendEchoMessages(c *Client) {
 	for !c.closed {
 		time.Sleep(1 * time.Minute)
 
+		if c.closed {
+			return
+		}
 		if err := c.Call("_echo", nil); err != nil {
 			l.Disconnect(c)
 		}
