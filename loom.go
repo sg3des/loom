@@ -15,6 +15,7 @@ import (
 )
 
 var log = logging.MustGetLogger("LOOM")
+var BufSize = 2 * 1024 * 1024
 var Debug bool
 
 type Handler func(req interface{}) (resp interface{}, err error)
@@ -167,7 +168,13 @@ func (l *Loom) wshandler(ws *websocket.Conn) {
 		log.Debug("total clients:", l.ClientsLen())
 	}
 
+	time.Sleep(1 * time.Second)
+
 	scanner := bufio.NewScanner(ws)
+
+	buf := make([]byte, BufSize)
+	scanner.Buffer(buf, BufSize)
+
 	for scanner.Scan() && c != nil && !c.closed {
 		msg, err := l.parsemsg(scanner.Bytes())
 		if err != nil {
